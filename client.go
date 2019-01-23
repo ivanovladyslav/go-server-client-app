@@ -11,58 +11,81 @@ import "unicode/utf8"
 import "unicode"
 import "strings"
 import "time"
+import "flag"
 
 func main() {
-    argsIpPort := os.Args[1] //"127.0.0.1:9999"
+    argsIpPort := flag.String("ip","","a string")
+    argsPort := flag.String("port",":9999","a string")
+    argsMaxClients := flag.Int("n",2,"an int")
+    flag.Parse()
 
-    i := 0 // connection index
-    hash := ""
-    key := ""
-    var s Session_protector
-    // connect to server
-    for {
-    connect:
-        c, errConn := net.Dial("tcp", argsIpPort)
-        if errConn != nil {
-            continue
-        } else {
+    if(*argsIpPort != "") {
+      i := 0 // connection index
+      hash := ""
+      key := ""
+      var s Session_protector
+      // connect to server
+      for {
+      connect:
+          c, errConn := net.Dial("tcp", *argsIpPort)
+          if errConn != nil {
+              continue
+          } else {
+              i++
+              if i <= 1 {
+                  compareKeys(c,hash,key,s)
+              } else {
+                  log.Println("Reconnected to server...")
+                  fmt.Println("---")
+              }
+          }
+
+          for {
+              // read in input from stdin
+              scannerStdin := bufio.NewScanner(os.Stdin)
+              fmt.Print("Send message: ")
+              for scannerStdin.Scan() {
+                  text := scannerStdin.Text()
+                  fmt.Println("---")
+                  // send to server
+                  _, errWrite := fmt.Fprintf(c, text+"\n")
+                  if errWrite != nil {
+                      log.Println("Server offline, attempting to reconnect...")
+                      goto connect
+                  }
+                  log.Print("Server receives: " + text)
+                  if text == "end" {
+                    os.Exit(0)
+                  }
+                  break
+              }
+              // listen for reply
+              if errReadConn := scannerStdin.Err(); errReadConn != nil {
+                  log.Printf("Read error: %T %+v", errReadConn, errReadConn)
+                  return
+              }
+              fmt.Println("---")
+          }
+      }
+    } else {
+      fmt.Println("Server launched...")
+      // listen on all interfaces
+      ln, _ := net.Listen("tcp", ":"+*argsPort)
+      i := 0
+      for {
+          // accept connection on port
+          if i < *argsMaxClients {
+            c, _ := ln.Accept()
             i++
-            if i <= 1 {
-                compareKeys(c,hash,key,s)
-            } else {
-                log.Println("Reconnected to server...")
-                fmt.Println("---")
-            }
-        }
-
-        for {
-            // read in input from stdin
-            scannerStdin := bufio.NewScanner(os.Stdin)
-            fmt.Print("Send message: ")
-            for scannerStdin.Scan() {
-                text := scannerStdin.Text()
-                fmt.Println("---")
-                // send to server
-                _, errWrite := fmt.Fprintf(c, text+"\n")
-                if errWrite != nil {
-                    log.Println("Server offline, attempting to reconnect...")
-                    goto connect
-                }
-                log.Print("Server receives: " + text)
-                if text == "end" {
-                  os.Exit(0)
-                }
-                break
-            }
-            // listen for reply
-            if errReadConn := scannerStdin.Err(); errReadConn != nil {
-                log.Printf("Read error: %T %+v", errReadConn, errReadConn)
-                return
-            }
+            fmt.Printf("Client %v connected...", i)
             fmt.Println("---")
-        }
+            // handle the connection
+            go handleServerConnection(c, i, &i)
+          }
+      }
     }
 }
+
 func compareKeys(c net.Conn, hash string, key string, s Session_protector) {
     keyToCompare := "" //server key
     matchedKeys := 0  //how much keys are the same
@@ -106,6 +129,7 @@ func compareKeys(c net.Conn, hash string, key string, s Session_protector) {
         fmt.Println("-----------------------------")
     }
 }
+
 func get_session_key() string {
   rand.Seed(time.Now().UTC().UnixNano())
 	var result = ""
@@ -147,6 +171,40 @@ func (s Session_protector) __calc_hash(session_key string, val int) int {
 		}
 	}
 	return result
+}
+
+func handleServerConnection(c net.Conn, i int, clCount *int) {
+    iteration := 0
+    nextKey := ""
+    var s Session_protector
+        // scan message
+    scanner := bufio.NewScanner(c)
+
+    for scanner.Scan() {
+        msg := scanner.Text()
+        log.Printf("Client %v sends: %v", i, msg)
+        fmt.Println("---")
+        if iteration == 0 {
+          s.__hash = msg
+          c.Write([]byte(msg + "\n"))
+          iteration = iteration + 1
+        } else if iteration == 1 {
+          nextKey = s.next_session_key(msg)
+          c.Write([]byte(nextKey + "\n"))
+          log.Printf("Client %v receives: %v", i, nextKey)
+          iteration = iteration + 1
+        } else if iteration < 7 {
+          nextKey = s.next_session_key(msg)
+          c.Write([]byte(nextKey + "\n"))
+          log.Printf("Client %v receives: %v", i, nextKey)
+          iteration = iteration + 1
+        }
+        if scanner.Text() == "end" {
+          *clCount = *clCount - 1
+          fmt.Println("client disconnected")
+          c.Close()
+        }
+    }
 }
 
 func (s Session_protector) next_session_key(session_key string) string {
